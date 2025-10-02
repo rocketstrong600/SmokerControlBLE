@@ -1,0 +1,5 @@
+.pio
+.platformio
+.cache
+.clangd
+.ccls
