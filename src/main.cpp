@@ -40,6 +40,7 @@
 #define M_STEPS_PER_REV 200
 
 #define M_STEPS_PER_OUT_REV M_STEPS_PER_REV*M_MICROSTEPS*M_GEAR_RATIO
+#define CurrentToPercent(current) ((current/1000.0)/(0.325/(0.11 + 0.02)))*100.0
 
 TMC2209Stepper stepper_driver;
 HardwareSerial & serial_stream = Serial1;
