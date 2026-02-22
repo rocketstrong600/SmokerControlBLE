@@ -21,6 +21,32 @@
 #include <PID_v1.h>
 #include <Preferences.h>
 
+#include "TMC2209.h"
+#include "FastAccelStepper.h"
+
+#define B_SERVO_PIN 38
+#define B_FAN_PIN 36
+
+#define M_DIR_PIN 34
+#define M_EN_PIN 35
+#define M_STEP_PIN 33
+#define M_TX_PIN 4
+#define M_RX_PIN 39
+
+#define M_MICROSTEPS 8
+
+#define M_GEAR_RATIO 10.3636
+
+#define M_STEPS_PER_REV 200
+
+#define M_STEPS_PER_OUT_REV M_STEPS_PER_REV*M_MICROSTEPS*M_GEAR_RATIO
+
+TMC2209Stepper stepper_driver;
+HardwareSerial & serial_stream = Serial1;
+
+FastAccelStepperEngine engine = FastAccelStepperEngine();
+FastAccelStepper *stepper = NULL;
+
 #define T_SERVICE "00A10074-6865-726D-6F77-6F726B730D0A"
 #define T_CHAR "00A11274-6865-726D-6F77-6F726B730D0A"
 
@@ -40,6 +66,7 @@ NimBLECharacteristic *dChar;
 NimBLECharacteristic *fanMaxChar;
 NimBLECharacteristic *fanPuffChar;
 NimBLECharacteristic *fanRestChar;
+NimBLECharacteristic *mChar;
 //NimBLECharacteristic *testOutput;
 
 
@@ -80,6 +107,9 @@ uint32_t msToDuty(uint32_t pulseWidth) {
   return static_cast<uint32_t>(dutyRatio * MAX_DUTY_CYCLE);
 }
 
+uint32_t RpmToMiliHZ(double rpm) {
+  return ((rpm*M_STEPS_PER_OUT_REV)/60.0)*1000.0;
+}
 
 void startAdvertising() {
   NimBLEAdvertising *advertising = NimBLEDevice::getAdvertising();
@@ -119,17 +149,52 @@ void temperatureNotify(NimBLERemoteCharacteristic* pCharacteristic, unsigned cha
 
 void setup()
 {
-  Serial.begin(9600);
+  Serial.begin(115200);
 
   settings.begin("SmokerCtrl");
 
+  engine.init();
+
+  stepper = engine.stepperConnectToPin(M_STEP_PIN);
+
+  if (stepper) {
+    stepper->setDirectionPin(M_DIR_PIN);
+    stepper->setEnablePin(M_EN_PIN, true);
+    stepper->setAutoEnable(true);
+  } else {
+    return;
+  }
+
+
+  stepper_driver.setup(serial_stream, 115200, 0, M_RX_PIN, M_TX_PIN);
+
+  if (stepper_driver.isSetupAndCommunicating())
+  {
+    Serial.println("Stepper driver setup and communicating!");
+  } else {
+    return;
+  }
+
+
+  stepper_driver.setRunCurrent(CurrentToPercent(1100));
+  stepper_driver.setHoldCurrent(CurrentToPercent(1000));
+  stepper_driver.setMicrostepsPerStep(M_MICROSTEPS);
+  stepper_driver.useExternalSenseResistors();
+  stepper_driver.enableAnalogCurrentScaling();
+  stepper_driver.disableStealthChop();
+  stepper_driver.enableAutomaticCurrentScaling();
+  stepper_driver.enable();
+  stepper_driver.moveUsingStepDirInterface();
+
+  stepper->setAcceleration(400);
+
   //FAN
-  ledcAttachPin(25, 0);
+  ledcAttachPin(B_FAN_PIN, 0);
   ledcSetup(0, 6000, 10);
   ledcWrite(0, 1023);
 
   //SERVO
-  ledcAttachPin(33, 1);
+  ledcAttachPin(B_SERVO_PIN, 1);
   ledcSetup(1, 333, 10);
   ledcWrite(1, msToDuty(760));
 
@@ -161,6 +226,7 @@ void setup()
   NimBLEDescriptor* tName = tChar->createDescriptor(static_cast<uint16_t>(0x2901));
   tType->setFormat(NimBLE2904::FORMAT_UTF8);
   tName->setValue("Target Temp");
+  tChar->addDescriptor(tName);
 
   tChar->setValue(settings.getString("target", "0.0"));
 
@@ -169,7 +235,8 @@ void setup()
   NimBLEDescriptor* pName = pChar->createDescriptor(static_cast<uint16_t>(0x2901));
   pType->setFormat(NimBLE2904::FORMAT_UTF8);
   pName->setValue("Proportional");
-  
+  pChar->addDescriptor(pName);
+
   pChar->setValue(settings.getString("consKp", "0.0"));
 
   iChar = servService->createCharacteristic("8a07b503-922f-4ef6-9a04-4d80509cd01e", NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::WRITE);
@@ -177,6 +244,7 @@ void setup()
   NimBLEDescriptor* iName = iChar->createDescriptor(static_cast<uint16_t>(0x2901));
   iType->setFormat(NimBLE2904::FORMAT_UTF8);
   iName->setValue("Integral");
+  iChar->addDescriptor(iName);
 
   iChar->setValue(settings.getString("consKi", "0.0"));
 
@@ -185,6 +253,7 @@ void setup()
   NimBLEDescriptor* dName = dChar->createDescriptor(static_cast<uint16_t>(0x2901));
   dType->setFormat(NimBLE2904::FORMAT_UTF8);
   dName->setValue("Derivative");
+  dChar->addDescriptor(dName);
 
   dChar->setValue(settings.getString("consKd", "0.0"));
 
@@ -193,6 +262,7 @@ void setup()
   NimBLEDescriptor* fanMaxName = fanMaxChar->createDescriptor(static_cast<uint16_t>(0x2901));
   fanMaxType->setFormat(NimBLE2904::FORMAT_UTF8);
   fanMaxName->setValue("Max Fan");
+  fanMaxChar->addDescriptor(fanMaxName);
 
   fanMaxChar->setValue(settings.getString("fanMax", "100.0"));
 
@@ -201,7 +271,8 @@ void setup()
   NimBLEDescriptor* fanPuffName = fanPuffChar->createDescriptor(static_cast<uint16_t>(0x2901));
   fanPuffType->setFormat(NimBLE2904::FORMAT_UTF8);
   fanPuffName->setValue("Fan Puff Duration");
-  
+  fanPuffChar->addDescriptor(fanPuffName);
+
   fanPuffChar->setValue(settings.getString("fanPuff", "6.0"));
 
   fanRestChar = servService->createCharacteristic("8a07b507-922f-4ef6-9a04-4d80509cd01e", NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::WRITE);
@@ -209,9 +280,18 @@ void setup()
   NimBLEDescriptor* fanRestName = fanRestChar->createDescriptor(static_cast<uint16_t>(0x2901));
   fanRestType->setFormat(NimBLE2904::FORMAT_UTF8);
   fanRestName->setValue("Fan Rest Duration");
+  fanRestChar->addDescriptor(fanRestName);
 
   fanRestChar->setValue(settings.getString("fanRest", "20.0"));
 
+  mChar = servService->createCharacteristic("8a07b508-922f-4ef6-9a04-4d80509cd01e", NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::WRITE);
+  NimBLE2904* mType = mChar->create2904();
+  NimBLEDescriptor* mName = mChar->createDescriptor(static_cast<uint16_t>(0x2901));
+  mType->setFormat(NimBLE2904::FORMAT_UTF8);
+  mName->setValue("Target RPM");
+  mChar->addDescriptor(mName);
+
+  mChar->setValue(settings.getString("rpm", "0.0"));
   
   servService->start();
 
@@ -262,6 +342,16 @@ void setup()
   tempPID.SetMode(AUTOMATIC);
   tempPID.SetOutputLimits(0, 511);
   tempPID.SetTunings(consKp, consKi, consKd);
+
+  String rpmTar = tChar->getValue();
+  double rpmTarDBL = rpmTar.toDouble();
+
+  stepper->setSpeedInMilliHz(RpmToMiliHZ(rpmTarDBL));
+  stepper->runForward();
+  if (rpmTarDBL == 0) {
+    stepper->stopMove();
+    stepper->disableOutputs();
+  }
 }
 
 void loop()
@@ -273,7 +363,21 @@ void loop()
   String maxFanNew = fanMaxChar->getValue();
   String fanPuffNew = fanPuffChar->getValue();
   String fanRestNew = fanRestChar->getValue();
+  String rpmTar = mChar->getValue();
 
+  double rpmTarDBL = rpmTar.toDouble();
+  String rpmCur = settings.getString("rpm", "0.0");
+
+  if (abs(rpmTarDBL - rpmCur.toDouble()) > 0.01) {
+    settings.putString("rpm", rpmTar);
+
+    stepper->setSpeedInMilliHz(RpmToMiliHZ(rpmTarDBL));
+    stepper->runForward();
+    if (rpmTarDBL == 0) {
+      stepper->stopMove();
+      stepper->disableOutputs();
+    }
+  }
 
   if (abs(tempTar.toDouble() - setpoint) > 0.01
     || abs(pNew.toDouble() - consKp) > 0.001
